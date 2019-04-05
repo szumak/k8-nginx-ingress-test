@@ -1,0 +1,223 @@
+#########################
+## Nginx Ingress Below ##
+#########################
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: nginx-ingress-szumskim
+---
+kind: ClusterRole
+apiVersion: rbac.authorization.k8s.io/v1beta1
+metadata:
+  name: nginx-ingress-szumskim
+rules:
+  - verbs:
+      - '*'
+    apiGroups:
+      - '*'
+    resources:
+      - '*'
+rules:
+  - verbs:
+      - list
+      - watch
+    apiGroups:
+      - ''
+      - extensions
+    resources:
+      - configmaps
+      - secrets
+      - endpoints
+      - ingresses
+      - nodes
+      - pods
+  - verbs:
+      - list
+      - watch
+      - get
+      - update
+    apiGroups:
+      - ''
+    resources:
+      - services
+  - verbs:
+      - get
+    apiGroups:
+      - extensions
+    resources:
+      - ingresses
+  - verbs:
+      - create
+    apiGroups:
+      - ''
+    resources:
+      - events
+      - ingresses
+      - endpoints
+      - configmaps
+  - verbs:
+      - update
+    apiGroups:
+      - '*'
+    resources:
+      - endpoints
+      - ingresses/status
+      - namespaces
+      - services
+      - configmaps
+  - verbs:
+      - update
+    apiGroups:
+      - extensions
+    resources:
+      - ingresses/status
+      - endpoints
+  - verbs:
+      - get
+    apiGroups:
+      - ''
+    resources:
+      - configmaps
+      - namespaces
+      - endpoints
+
+---
+
+apiVersion: rbac.authorization.k8s.io/v1beta1
+kind: ClusterRoleBinding
+metadata:
+  name: nginx-ingress-szumskim
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: nginx-ingress-szumskim
+subjects:
+  - kind: ServiceAccount
+    name: nginx-ingress-szumskim
+    namespace: szumskim
+
+---
+
+kind: Service
+apiVersion: v1
+metadata:
+  name: nginx-ingress-controller
+  annotations:
+    nginx.ingress.kubernetes.io/cors-allow-headers: 'X-Forwarded-For'
+    nginx.org/proxy-pass-headers: 'True-Client-IP,Referrer'
+    nginx.ingress.kubernetes.io/enable-cors: 'true'
+    kubernetes.io/ingress.allow-http: "false"
+    ssl-redirect: 'true'
+    service.beta.kubernetes.io/aws-load-balancer-cross-zone-load-balancing-enabled: 'true'
+    service.beta.kubernetes.io/aws-load-balancer-connection-idle-timeout: '600'
+    service.beta.kubernetes.io/aws-load-balancer-ssl-ports: https
+    service.beta.kubernetes.io/aws-load-balancer-backend-protocol: http
+    service.beta.kubernetes.io/aws-load-balancer-ssl-negotiation-policy: "###ELBSecurityPolicy"
+    service.beta.kubernetes.io/aws-load-balancer-ssl-cert: >- 
+      ###certificate ARN
+spec:
+  ports:
+    - name: http
+      protocol: TCP
+      port: 80
+      targetPort: 80
+    - name: https
+      protocol: TCP
+      port: 443
+      targetPort: 80
+  selector:
+    k8s-app: nginx-ingress-lb
+  type: LoadBalancer
+  sessionAffinity: None
+  loadBalancerSourceRanges:
+    - 0.0.0.0/0
+---
+kind: Deployment
+apiVersion: extensions/v1beta1
+metadata:
+  name: nginx-ingress-controller
+  labels:
+    effective.namespace: szumskim
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      k8s-app: nginx-ingress-lb
+  template:
+    metadata:
+      name: nginx-ingress-controller
+      labels:
+        k8s-app: nginx-ingress-lb
+    spec:
+      restartPolicy: Always
+      serviceAccountName: nginx-ingress-szumskim
+      schedulerName: default-scheduler
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: node-role.kubernetes.io/master
+                    operator: DoesNotExist
+      terminationGracePeriodSeconds: 60
+      securityContext: {}
+      containers:
+        - resources: {}
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 18080
+              scheme: HTTP
+            timeoutSeconds: 5
+            periodSeconds: 10
+            successThreshold: 1
+            failureThreshold: 3
+          terminationMessagePath: /dev/termination-log
+          name: nginx-ingress-controller
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 18080
+              scheme: HTTP
+            initialDelaySeconds: 10
+            timeoutSeconds: 5
+            periodSeconds: 10
+            successThreshold: 1
+            failureThreshold: 3
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  apiVersion: v1
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  apiVersion: v1
+                  fieldPath: metadata.namespace
+          ports:
+            - containerPort: 80
+              protocol: TCP
+            - containerPort: 443
+              protocol: TCP
+          imagePullPolicy: IfNotPresent
+          terminationMessagePolicy: File
+          image: 'quay.io/kubernetes-ingress-controller/nginx-ingress-controller:0.22.0'
+          args:
+            - /nginx-ingress-controller
+            - '--default-backend-service=szumskim/nginx-default-backend'
+            - '--default-ssl-certificate=szumskim/default-tls-certificate'
+            - '--publish-service=szumskim/nginx-ingress-controller'
+            - '--ingress-class=szumskim'
+            - '--configmap=szumskim/nginx-configuration'
+            - '--watch-namespace=szumskim'
+            - '--v=3'
+      serviceAccount: nginx-ingress-szumskim
+      dnsPolicy: ClusterFirst
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+      maxSurge: 2
+  revisionHistoryLimit: 2
